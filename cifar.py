@@ -23,6 +23,8 @@ import models.cifar as models
 
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from datasets import TrafficLight
+from efficientnet_pytorch import EfficientNet
+
 
 
 model_names = sorted(name for name in models.__dict__
@@ -116,7 +118,8 @@ def main():
     # Data
     print('==> Preparing dataset %s' % args.dataset)
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        # transforms.RandomCrop(32, padding=4),
+        transforms.Resize((32, 32)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
@@ -132,16 +135,24 @@ def main():
     elif args.dataset == 'cifar100':
         dataloader = datasets.CIFAR100
         num_classes = 100
-    if isinstance(args.dataset, str):
-        traffic_light_dataset = TrafficLight(args.dataset)
 
 
+    if args.dataset == 'cifar10' or args.dataset == 'cifar100':
+        trainset = dataloader(root='./data', train=True, download=True, transform=transform_train)
+        trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=True, num_workers=args.workers)
 
-    trainset = dataloader(root='./data', train=True, download=True, transform=transform_train)
-    trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=True, num_workers=args.workers)
+        testset = dataloader(root='./data', train=False, download=False, transform=transform_test)
+        testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
+    else:
+        dataloader = TrafficLight
+        num_classes = 4
+        trainset = dataloader(root_='/autox-sz/departments/perception/xdataset/trafficlight_china/dataset_classifer',\
+                              train=True, transform=transform_train)
+        trainloader = data.DataLoader(trainset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
 
-    testset = dataloader(root='./data', train=False, download=False, transform=transform_test)
-    testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
+        testset = dataloader(root_='/autox-sz/departments/perception/xdataset/trafficlight_china/dataset_classifer', \
+                              train=False, transform=transform_train)
+        testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
 
     # Model
     print("==> creating model '{}'".format(args.arch))
@@ -174,6 +185,8 @@ def main():
                     depth=args.depth,
                     block_name=args.block_name,
                 )
+    elif args.arch.endswith('efficientnet'):
+        model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=num_classes)
     else:
         model = models.__dict__[args.arch](num_classes=num_classes)
 
@@ -186,7 +199,6 @@ def main():
             name = k[7:]  # remove module.
             new_state_dict[name] = v
         model.load_state_dict(new_state_dict)
-        import pdb; pdb.set_trace()
         batch_data = testloader.__iter__().__next__()[0]
         torch.onnx.export(model, batch_data, args.export, verbose=True, opset_version=10)
 
@@ -259,11 +271,11 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
     data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
     end = time.time()
 
     bar = Bar('Processing', max=len(trainloader))
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
+    for batch_idx, (inputs, targets, _) in enumerate(trainloader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -276,10 +288,10 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
         loss = criterion(outputs, targets)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
+        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
         losses.update(loss.item(), inputs.size(0))
         top1.update(prec1.item(), inputs.size(0))
-        top5.update(prec5.item(), inputs.size(0))
+        top2.update(prec2.item(), inputs.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -291,7 +303,7 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
         end = time.time()
 
         # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
                     batch=batch_idx + 1,
                     size=len(trainloader),
                     data=data_time.avg,
@@ -300,7 +312,7 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
                     eta=bar.eta_td,
                     loss=losses.avg,
                     top1=top1.avg,
-                    top5=top5.avg,
+                    top2=top2.avg,
                     )
         bar.next()
     bar.finish()
@@ -313,14 +325,14 @@ def test(testloader, model, criterion, epoch, use_cuda):
     data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
 
     # switch to evaluate mode
     model.eval()
 
     end = time.time()
     bar = Bar('Processing', max=len(testloader))
-    for batch_idx, (inputs, targets) in enumerate(testloader):
+    for batch_idx, (inputs, targets, _) in enumerate(testloader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -333,17 +345,17 @@ def test(testloader, model, criterion, epoch, use_cuda):
         loss = criterion(outputs, targets)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
+        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
         losses.update(loss.item(), inputs.size(0))
         top1.update(prec1.item(), inputs.size(0))
-        top5.update(prec5.item(), inputs.size(0))
+        top2.update(prec2.item(), inputs.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
                     batch=batch_idx + 1,
                     size=len(testloader),
                     data=data_time.avg,
@@ -352,7 +364,7 @@ def test(testloader, model, criterion, epoch, use_cuda):
                     eta=bar.eta_td,
                     loss=losses.avg,
                     top1=top1.avg,
-                    top5=top5.avg,
+                    top2=top2.avg,
                     )
         bar.next()
     bar.finish()

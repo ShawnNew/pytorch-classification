@@ -68,3 +68,5 @@ from .resnext import *
 from .wrn import *
 from .preresnet import *
 from .densenet import *
+from efficientnet_pytorch import *
+
