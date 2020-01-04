@@ -24,7 +24,17 @@ import models.cifar as models
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from datasets import TrafficLight
 from efficientnet_pytorch import EfficientNet
+import onnxruntime
+import numpy as np
 
+try:
+    import apex
+    from apex.parallel import DistributedDataParallel as DDP
+    from apex.fp16_utils import *
+    from apex import amp, optimizers
+    from apex.multi_tensor_apply import multi_tensor_applier
+except ImportError:
+    raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
 
 
 model_names = sorted(name for name in models.__dict__
@@ -41,9 +51,9 @@ parser.add_argument('--epochs', default=300, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('--train-batch', default=128, type=int, metavar='N',
+parser.add_argument('--train_batch', default=200, type=int, metavar='N',
                     help='train batchsize')
-parser.add_argument('--test-batch', default=100, type=int, metavar='N',
+parser.add_argument('--test_batch', default=150, type=int, metavar='N',
                     help='test batchsize')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
@@ -85,6 +95,13 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
 #Device options
 parser.add_argument('--gpu-id', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
+
+# Amp parameters
+parser.add_argument('--sync_bn', action='store_true',
+                        help='enabling apex sync BN.')
+parser.add_argument('--opt-level', type=str)
+parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
+parser.add_argument('--loss-scale', type=str, default=None)
 
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
@@ -146,12 +163,10 @@ def main():
     else:
         dataloader = TrafficLight
         num_classes = 4
-        trainset = dataloader(root_='/autox-sz/departments/perception/xdataset/trafficlight_china/dataset_classifer',\
-                              train=True, transform=transform_train)
-        trainloader = data.DataLoader(trainset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
+        trainset = dataloader(root_=args.dataset, train=True, transform=transform_train)
+        trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=False, num_workers=args.workers)
 
-        testset = dataloader(root_='/autox-sz/departments/perception/xdataset/trafficlight_china/dataset_classifer', \
-                              train=False, transform=transform_train)
+        testset = dataloader(root_=args.dataset, train=False, transform=transform_train)
         testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
 
     # Model
@@ -187,6 +202,7 @@ def main():
                 )
     elif args.arch.endswith('efficientnet'):
         model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=num_classes)
+        model.set_swish(memory_efficient=False)
     else:
         model = models.__dict__[args.arch](num_classes=num_classes)
 
@@ -199,18 +215,42 @@ def main():
             name = k[7:]  # remove module.
             new_state_dict[name] = v
         model.load_state_dict(new_state_dict)
-        batch_data = testloader.__iter__().__next__()[0]
-        torch.onnx.export(model, batch_data, args.export, verbose=True, opset_version=10)
+        model.eval()
+        batch_data = next(testloader.__iter__())
+        torch.onnx.export(model, batch_data[0], args.export, verbose=True, opset_version=10)
+        inputs = {"input.1": batch_data[0]}
+        ort_session = onnxruntime.InferenceSession(args.export)
+        ort_inputs = dict()
+        for i, k in enumerate(inputs):
+            ort_inputs[ort_session.get_inputs()[i].name] = inputs[k].numpy()
 
+        torch_out = model(batch_data[0])
+        ort_outs = ort_session.run(None, ort_inputs)[0]
+        targets = batch_data[1]
 
-    model = torch.nn.DataParallel(model).cuda()
+        np.testing.assert_allclose(torch_out.detach().numpy(), ort_outs, rtol=1e-03, atol=1e-03)
+        print('Exported successfully!!!')
+        exit()
+
+    # model = torch.nn.DataParallel(model).cuda()
+    model = model.cuda()
+    if args.sync_bn:
+        print("using apex synced BN")
+        model = apex.parallel.convert_syncbn_model(model)
     cudnn.benchmark = True
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
+    # Initialize Amp.
+    model, optimizer = amp.initialize(model, optimizer,
+                                    opt_level=args.opt_level)
+
+    
+    model = torch.nn.DataParallel(model)
+
     # Resume
-    title = 'cifar-10-' + args.arch
+    title = args.arch
     if args.resume:
         # Load checkpoint.
         print('==> Resuming from checkpoint..')
@@ -221,6 +261,7 @@ def main():
         start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
+        amp.load_state_dict(checkpoint['amp'])
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
     else:
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
@@ -254,6 +295,7 @@ def main():
                 'acc': test_acc,
                 'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict(),
+                'amp': amp.state_dict()
             }, is_best, checkpoint=args.checkpoint)
 
     logger.close()
@@ -295,7 +337,9 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
+        with amp.scale_loss(loss, optimizer) as scaled_loss:
+            scaled_loss.backward()
+        # loss.backward()
         optimizer.step()
 
         # measure elapsed time
