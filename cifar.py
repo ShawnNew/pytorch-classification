@@ -106,8 +106,6 @@ parser.add_argument('--loss-scale', type=str, default=None)
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
 
-# Validate dataset
-# assert args.dataset == 'cifar10' or args.dataset == 'cifar100', 'Dataset can only be cifar10 or cifar100.'
 
 # Use CUDA
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
@@ -206,6 +204,7 @@ def main():
     else:
         model = models.__dict__[args.arch](num_classes=num_classes)
 
+    # Export to onnx if given.
     if args.export:
         print("==> export the model to onnx..")
         checkpoint = torch.load(args.resume)
@@ -232,7 +231,6 @@ def main():
         print('Exported successfully!!!')
         exit()
 
-    # model = torch.nn.DataParallel(model).cuda()
     model = model.cuda()
     if args.sync_bn:
         print("using apex synced BN")
@@ -246,10 +244,7 @@ def main():
     model, optimizer = amp.initialize(model, optimizer,
                                     opt_level=args.opt_level)
 
-    
-    model = torch.nn.DataParallel(model)
-
-    # Resume
+    # Resume from checkpoint if given.
     title = args.arch
     if args.resume:
         # Load checkpoint.
@@ -257,17 +252,26 @@ def main():
         assert os.path.isfile(args.resume), 'Error: no checkpoint directory found!'
         args.checkpoint = os.path.dirname(args.resume)
         checkpoint = torch.load(args.resume)
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint['state_dict'].items():
+            name = k[7:]  # remove module.
+            new_state_dict[name] = v
+        model.load_state_dict(new_state_dict)
         best_acc = checkpoint['best_acc']
         start_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['state_dict'])
+        # model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         amp.load_state_dict(checkpoint['amp'])
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
     else:
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
         logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Acc.', 'Valid Acc.'])
+    
+    # data spawn across GPUs.
+    model = torch.nn.DataParallel(model)
 
-
+    # Evaluate only if given.
     if args.evaluate:
         print('\nEvaluation only')
         test_loss, test_acc = test(testloader, model, criterion, start_epoch, use_cuda)
