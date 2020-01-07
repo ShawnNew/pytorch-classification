@@ -26,10 +26,10 @@ class TrafficLight(Dataset):
 
         random.shuffle(samples_list)
         if self.trainable:
-            self.samples_list = samples_list[:int(len(samples_list)*0.7)+1]
+            self.samples_list = samples_list[:int(len(samples_list)*0.9)+1]
             print("There are {} samples in training set.".format(len(self.samples_list)))
         else:
-            self.samples_list = samples_list[int(len(samples_list) * 0.7)+1:]
+            self.samples_list = samples_list[int(len(samples_list) * 0.9)+1:]
             print("There are {} samples in testing set.".format(len(self.samples_list)))
 
     def __len__(self):

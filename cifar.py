@@ -162,10 +162,10 @@ def main():
         dataloader = TrafficLight
         num_classes = 4
         trainset = dataloader(root_=args.dataset, train=True, transform=transform_train)
-        trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=False, num_workers=args.workers)
+        trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
         testset = dataloader(root_=args.dataset, train=False, transform=transform_train)
-        testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
+        testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # Model
     print("==> creating model '{}'".format(args.arch))
@@ -199,7 +199,7 @@ def main():
                     block_name=args.block_name,
                 )
     elif args.arch.endswith('efficientnet'):
-        model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=num_classes)
+        model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=num_classes)
         model.set_swish(memory_efficient=False)
     else:
         model = models.__dict__[args.arch](num_classes=num_classes)
@@ -216,16 +216,17 @@ def main():
         model.load_state_dict(new_state_dict)
         model.eval()
         batch_data = next(testloader.__iter__())
-        torch.onnx.export(model, batch_data[0], args.export, verbose=True, opset_version=10)
-        inputs = {"input.1": batch_data[0]}
+        batch_data = batch_data[0][:64]
+        # torch.onnx.export(model, batch_data, args.export, verbose=True, opset_version=10)
+        inputs = {"input.1": batch_data}
         ort_session = onnxruntime.InferenceSession(args.export)
         ort_inputs = dict()
         for i, k in enumerate(inputs):
             ort_inputs[ort_session.get_inputs()[i].name] = inputs[k].numpy()
 
-        torch_out = model(batch_data[0])
+        torch_out = model(batch_data)
         ort_outs = ort_session.run(None, ort_inputs)[0]
-        targets = batch_data[1]
+        # targets = batch_data[1]
 
         np.testing.assert_allclose(torch_out.detach().numpy(), ort_outs, rtol=1e-03, atol=1e-03)
         print('Exported successfully!!!')
