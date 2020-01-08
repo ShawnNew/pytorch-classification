@@ -217,7 +217,7 @@ def main():
         model.eval()
         batch_data = next(testloader.__iter__())
         batch_data = batch_data[0][:64]
-        # torch.onnx.export(model, batch_data, args.export, verbose=True, opset_version=10)
+        torch.onnx.export(model, batch_data, args.export, verbose=True, opset_version=10)
         inputs = {"input.1": batch_data}
         ort_session = onnxruntime.InferenceSession(args.export)
         ort_inputs = dict()
