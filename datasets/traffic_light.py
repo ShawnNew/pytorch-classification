@@ -29,7 +29,7 @@ class TrafficLight(Dataset):
             self.samples_list = samples_list[:int(len(samples_list)*0.9)+1]
             print("There are {} samples in training set.".format(len(self.samples_list)))
         else:
-            self.samples_list = samples_list[int(len(samples_list) * 0.9)+1:]
+            self.samples_list = samples_list#[int(len(samples_list) * 0.9)+1:]
             # self.samples_list = list(filter(lambda x: x[1]==3, samples_list))  # select all green class.
             print("There are {} samples in testing set.".format(len(self.samples_list)))
 

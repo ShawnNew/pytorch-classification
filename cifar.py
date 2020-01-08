@@ -7,8 +7,8 @@ from __future__ import print_function
 import argparse
 import os
 import shutil
-import time
 import random
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import models.cifar as models
 
-from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
+from utils import Bar, Logger, mkdir_p, savefig, train, test, ort_evalute, trt_evalute
 from datasets import TrafficLight
 from efficientnet_pytorch import EfficientNet
 import onnxruntime
@@ -92,8 +92,10 @@ parser.add_argument('--compressionRate', type=int, default=2, help='Compression 
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--ort_test', action='store_true',
+parser.add_argument('--ort_test', type=str,
                     help='evalute model on onnxruntime')
+parser.add_argument('--trt_test', type=str,
+                    help='evalute model on trt')
 #Device options
 parser.add_argument('--gpu-id', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
@@ -127,10 +129,10 @@ def main():
     global best_acc
     start_epoch = args.start_epoch  # start from epoch 0 or last checkpoint epoch
 
+    cur_path = Path(os.getcwd())
+
     if not os.path.isdir(args.checkpoint):
         mkdir_p(args.checkpoint)
-
-
 
     # Data
     print('==> Preparing dataset %s' % args.dataset)
@@ -246,7 +248,15 @@ def main():
 
     if args.ort_test:
         print('\nEvaluation on onnxruntime.')
-        test_loss, test_acc = ort_evalute(testloader, './checkpoint/resnet-50/resnet_classifier_fp16_b10_simp.onnx', criterion)
+        ort_path = cur_path / args.ort_test
+        test_loss, test_acc = ort_evalute(testloader, ort_path, criterion, args.test_batch)
+        print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
+        return
+
+    if args.trt_test:
+        print('\nEvaluation on tensorRT.')
+        trt_path = cur_path / args.trt_test
+        test_loss, test_acc = trt_evalute(testloader, trt_path, criterion, args.test_batch)
         print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
         return
 
@@ -319,166 +329,6 @@ def main():
 
     print('Best acc:')
     print(best_acc)
-
-def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
-    # switch to train mode
-    model.train()
-
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top2 = AverageMeter()
-    end = time.time()
-
-    bar = Bar('Processing', max=len(trainloader))
-    for batch_idx, (inputs, targets, _) in enumerate(trainloader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
-        inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
-
-        # compute output
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-
-        # measure accuracy and record loss
-        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
-        losses.update(loss.item(), inputs.size(0))
-        top1.update(prec1.item(), inputs.size(0))
-        top2.update(prec2.item(), inputs.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward()
-        # loss.backward()
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
-                    batch=batch_idx + 1,
-                    size=len(trainloader),
-                    data=data_time.avg,
-                    bt=batch_time.avg,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    top1=top1.avg,
-                    top2=top2.avg,
-                    )
-        bar.next()
-    bar.finish()
-    return (losses.avg, top1.avg)
-
-def test(testloader, model, criterion, epoch, use_cuda):
-    global best_acc
-
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top2 = AverageMeter()
-
-    # switch to evaluate mode
-    model.eval()
-
-    end = time.time()
-    bar = Bar('Processing', max=len(testloader))
-    for batch_idx, (inputs, targets, _) in enumerate(testloader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
-        inputs, targets = torch.autograd.Variable(inputs, volatile=True), torch.autograd.Variable(targets)
-
-        # compute output
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-
-        # measure accuracy and record loss
-        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
-        losses.update(loss.item(), inputs.size(0))
-        top1.update(prec1.item(), inputs.size(0))
-        top2.update(prec2.item(), inputs.size(0))
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
-                    batch=batch_idx + 1,
-                    size=len(testloader),
-                    data=data_time.avg,
-                    bt=batch_time.avg,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    top1=top1.avg,
-                    top2=top2.avg,
-                    )
-        bar.next()
-    bar.finish()
-    return (losses.avg, top1.avg)
-
-
-def ort_evalute(testloader, onnx_path, criterion):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top2 = AverageMeter()
-    ort_session = onnxruntime.InferenceSession(onnx_path)
-
-    end = time.time()
-    bar = Bar('Processing', max=len(testloader))
-
-    for batch_idx, (inputs, targets, _) in enumerate(testloader):
-        # if inputs.shape[0] != 150:
-        #     continue
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        batch_data = {"input.1": inputs.numpy()}
-
-        ort_outs = ort_session.run(None, batch_data)[0]
-
-        outputs = torch.tensor(ort_outs).float()
-        loss = criterion(outputs, targets)
-
-        # measure accuracy and record loss
-        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
-        losses.update(loss.item(), inputs.size(0))
-        top1.update(prec1.item(), inputs.size(0))
-        top2.update(prec2.item(), inputs.size(0))
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        bar.suffix = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
-            batch=batch_idx + 1,
-            size=len(testloader),
-            data=data_time.avg,
-            bt=batch_time.avg,
-            total=bar.elapsed_td,
-            eta=bar.eta_td,
-            loss=losses.avg,
-            top1=top1.avg,
-            top2=top2.avg,
-        )
-        bar.next()
-    bar.finish()
-    return (losses.avg, top1.avg)
 
 def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
