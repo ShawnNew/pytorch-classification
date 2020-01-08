@@ -92,6 +92,8 @@ parser.add_argument('--compressionRate', type=int, default=2, help='Compression 
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
+parser.add_argument('--ort_test', action='store_true',
+                    help='evalute model on onnxruntime')
 #Device options
 parser.add_argument('--gpu-id', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
@@ -240,6 +242,13 @@ def main():
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+
+    if args.ort_test:
+        print('\nEvaluation on onnxruntime.')
+        test_loss, test_acc = ort_evalute(testloader, './checkpoint/resnet_classifier_fp16_b150_simp.onnx', criterion)
+        print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
+        return
+
 
     # Initialize Amp.
     model, optimizer = amp.initialize(model, optimizer,
@@ -415,6 +424,57 @@ def test(testloader, model, criterion, epoch, use_cuda):
                     top1=top1.avg,
                     top2=top2.avg,
                     )
+        bar.next()
+    bar.finish()
+    return (losses.avg, top1.avg)
+
+
+def ort_evalute(testloader, onnx_path, criterion):
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top2 = AverageMeter()
+    ort_session = onnxruntime.InferenceSession(onnx_path)
+
+    end = time.time()
+    bar = Bar('Processing', max=len(testloader))
+
+    for batch_idx, (inputs, targets, _) in enumerate(testloader):
+        if inputs.shape[0] != 150:
+            continue
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        batch_data = {"input.1": inputs.numpy()}
+
+        ort_outs = ort_session.run(None, batch_data)[0]
+
+        outputs = torch.tensor(ort_outs).float()
+        loss = criterion(outputs, targets)
+
+        # measure accuracy and record loss
+        prec1, prec2 = accuracy(outputs.data, targets.data, topk=(1, 2))
+        losses.update(loss.item(), inputs.size(0))
+        top1.update(prec1.item(), inputs.size(0))
+        top2.update(prec2.item(), inputs.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        # plot progress
+        bar.suffix = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top2: {top2: .4f}'.format(
+            batch=batch_idx + 1,
+            size=len(testloader),
+            data=data_time.avg,
+            bt=batch_time.avg,
+            total=bar.elapsed_td,
+            eta=bar.eta_td,
+            loss=losses.avg,
+            top1=top1.avg,
+            top2=top2.avg,
+        )
         bar.next()
     bar.finish()
     return (losses.avg, top1.avg)
