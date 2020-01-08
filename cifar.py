@@ -143,6 +143,7 @@ def main():
     ])
 
     transform_test = transforms.Compose([
+        transforms.Resize((32, 32)),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
@@ -166,7 +167,7 @@ def main():
         trainset = dataloader(root_=args.dataset, train=True, transform=transform_train)
         trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
-        testset = dataloader(root_=args.dataset, train=False, transform=transform_train)
+        testset = dataloader(root_=args.dataset, train=False, transform=transform_test)
         testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # Model
@@ -245,7 +246,7 @@ def main():
 
     if args.ort_test:
         print('\nEvaluation on onnxruntime.')
-        test_loss, test_acc = ort_evalute(testloader, './checkpoint/resnet_classifier_fp16_b150_simp.onnx', criterion)
+        test_loss, test_acc = ort_evalute(testloader, './checkpoint/resnet-50/resnet_classifier_fp16_b10_simp.onnx', criterion)
         print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
         return
 
@@ -283,7 +284,7 @@ def main():
 
     # Evaluate only if given.
     if args.evaluate:
-        print('\nEvaluation only')
+        print('\nEvaluation on pytorch')
         test_loss, test_acc = test(testloader, model, criterion, start_epoch, use_cuda)
         print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
         return
@@ -441,8 +442,8 @@ def ort_evalute(testloader, onnx_path, criterion):
     bar = Bar('Processing', max=len(testloader))
 
     for batch_idx, (inputs, targets, _) in enumerate(testloader):
-        if inputs.shape[0] != 150:
-            continue
+        # if inputs.shape[0] != 150:
+        #     continue
         # measure data loading time
         data_time.update(time.time() - end)
 
